@@ -48,4 +48,7 @@ dependencies {
     // ExoPlayer for "play this URL": the platform MediaPlayer's HLS cannot read fMP4 segments (VK Video's, for one).
     implementation 'androidx.media3:media3-exoplayer:1.4.1'
     implementation 'androidx.media3:media3-exoplayer-hls:1.4.1'
+    // Colour emoji for track titles: the TV's fonts draw them as flat outlines. Bundled, as the TV may lack
+    // Google's downloadable fonts.
+    implementation 'androidx.emoji2:emoji2-bundled:1.4.0'
 }
