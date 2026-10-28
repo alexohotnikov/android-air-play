@@ -1,0 +1,132 @@
+diff --git a/lib/http_handlers.h b/lib/http_handlers.h
+index a19d2ad..c93df76 100644
+--- a/lib/http_handlers.h
++++ b/lib/http_handlers.h
+@@ -395,6 +395,75 @@ http_handler_reverse(raop_conn_t *conn, http_request_t *request, http_response_t
+  listed in the Master Playlist.     The POST /action request contains the playlist requested by the Server in
+  the preceding "FCUP Request".   The FCUP Request sequence  continues until all Media Playlists have been obtained by the Server */ 
+ 
++/* playlistInsert: the client queues its next video and expects the receiver to start it, with no POST /play
++   (VK Video switches videos this way). Plays a plain http(s) Content-Location as http_handler_play does;
++   other items (such as YouTube's HLS) are only logged. */
++static void
++start_inserted_video(raop_t *raop, plist_t item, const char *apple_session_id) {
++    char *uuid = NULL;
++    char *location = NULL;
++    double start = 0.0;
++    plist_t node = plist_dict_get_item(item, "uuid");
++    if (PLIST_IS_STRING(node)) plist_get_string_val(node, &uuid);
++    node = plist_dict_get_item(item, "Content-Location");
++    if (PLIST_IS_STRING(node)) plist_get_string_val(node, &location);
++    node = plist_dict_get_item(item, "Start-Position-Seconds");
++    if (PLIST_IS_REAL(node)) plist_get_real_val(node, &start);
++    if (!uuid || !location || !apple_session_id
++        || (strncmp(location, "http://", strlen("http://")) && strncmp(location, "https://", strlen("https://")))) {
++        char keys[256] = {0};
++        plist_dict_iter iter = NULL;
++        plist_dict_new_iter(item, &iter);
++        char *key = NULL;
++        plist_t val = NULL;
++        while (iter) {
++            plist_dict_next_item(item, iter, &key, &val);
++            if (!key) break;
++            if (strlen(keys) + strlen(key) + 2 < sizeof(keys)) {
++                strcat(keys, key);
++                strcat(keys, " ");
++            }
++            plist_mem_free(key);
++            key = NULL;
++        }
++        free(iter);
++        logger_log(raop->logger, LOGGER_INFO, "playlistInsert: item not played (keys: %s)", keys);
++        goto done;
++    }
++    int id = get_playlist_by_uuid(raop, uuid);
++    if (id >= 0) {
++        raop_destroy_airplay_video(raop, id);
++    }
++    id = -1;
++    for (int i = 0; i < MAX_AIRPLAY_VIDEO; i++) {
++        if (!raop->airplay_video[i]) {
++            id = i;
++            break;
++        }
++    }
++    if (id < 0) {
++        /* no free slot: reuse the one after the current video, as http_handler_play keeps one free */
++        id = (raop->current_video + 1 + MAX_AIRPLAY_VIDEO) % MAX_AIRPLAY_VIDEO;
++        raop_destroy_airplay_video(raop, id);
++    }
++    raop->airplay_video[id] = airplay_video_init(raop, raop->port, raop->lang, raop->lang_subtitles,
++                                                 raop->lang_system);
++    airplay_video_t *video = raop->airplay_video[id];
++    if (!video) {
++        goto done;
++    }
++    raop->current_video = id;
++    set_apple_session_id(video, apple_session_id, strlen(apple_session_id));
++    set_playback_uuid(video, uuid, strlen(uuid));
++    set_start_position_seconds(video, (float) start);
++    set_playback_location(video, location, strlen(location));
++    logger_log(raop->logger, LOGGER_INFO, "playlistInsert: playing the inserted video from %.1f s", start);
++    raop->callbacks.on_video_play(raop->callbacks.cls, get_playback_location(video), (float) start);
++ done:
++    plist_mem_free(uuid);
++    plist_mem_free(location);
++}
++
+ static void
+ http_handler_action(raop_conn_t *conn, http_request_t *request, http_response_t *response,
+                     char **response_data, int *response_datalen) {
+@@ -410,10 +479,13 @@ http_handler_action(raop_conn_t *conn, http_request_t *request, http_response_t
+     char *type = NULL;
+     bool logger_debug = (logger_get_level(raop->logger) >= LOGGER_DEBUG);
+ 
+-    /* fetched only after the locals above are initialized: post_action_error releases them */
+-    airplay_video = (airplay_video_t *) hls_get_current_video(raop);
+-    if (!airplay_video) {
+-        goto post_action_error;
++    /* fetched only after the locals above are initialized: post_action_error releases them.
++       No current video is not an error: playlistRemove has just cleared it and a playlistInsert may follow. */
++    if (raop->current_video >= 0) {
++        airplay_video = (airplay_video_t *) hls_get_current_video(raop);
++        if (!airplay_video) {
++            goto post_action_error;
++        }
+     }
+ 
+     const char* session_id = http_request_get_header(request, "X-Apple-Session-ID");
+@@ -421,8 +493,8 @@ http_handler_action(raop_conn_t *conn, http_request_t *request, http_response_t
+         logger_log(raop->logger, LOGGER_ERR, "Play request had no X-Apple-Session-ID");
+         goto post_action_error;
+     }    
+-    const char *apple_session_id = get_apple_session_id(airplay_video);
+-    if (strcmp(session_id, apple_session_id)){
++    const char *apple_session_id = airplay_video ? get_apple_session_id(airplay_video) : session_id;
++    if (airplay_video && strcmp(session_id, apple_session_id)){
+         logger_log(raop->logger, LOGGER_ERR, "X-Apple-Session-ID has changed:\n  was:\"%s\"\n  now:\"%s\"",
+                    apple_session_id, session_id);
+         goto post_action_error;
+@@ -482,7 +554,7 @@ http_handler_action(raop_conn_t *conn, http_request_t *request, http_response_t
+         plist_get_string_val(req_params_item_uuid_node, &remove_uuid);
+         assert(remove_uuid);
+         int id  =  get_playlist_by_uuid(raop, remove_uuid);
+-        if (id == raop->current_video) {
++        if (airplay_video && id == raop->current_video) {
+             raop->current_video = -1;
+             float position = raop->callbacks.on_video_playlist_remove(raop->callbacks.cls);
+             /* keep the playlist (until space is needed for another one) in case its playback_uuid is re-requested
+@@ -516,8 +588,12 @@ http_handler_action(raop_conn_t *conn, http_request_t *request, http_response_t
+             printf("playlistInsert parameter item list is:\n%s", plist_xml);
+             plist_mem_free(plist_xml);
+         }
+-        logger_log(raop->logger, LOGGER_ERR, "FIXME: playlistInsert is not yet implemented");
++        start_inserted_video(raop, req_params_item_node, session_id);
+ 
++    } else if (!airplay_video) {
++        /* the remaining types act on the current video; without one, answering 400 makes iOS give up on the
++           receiver and send the video's sound only */
++        logger_log(raop->logger, LOGGER_INFO, "POST /action %s with no current video: ignored", type);
+     } else if (!strcmp(type, "unhandledURLResponse")) {   
+         /* handling type "unhandledURLResponse" */
+         uint_val = 0;

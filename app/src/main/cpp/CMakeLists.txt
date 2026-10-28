@@ -4,6 +4,20 @@ project(airplaytv C CXX)
 set(TP ${CMAKE_CURRENT_SOURCE_DIR}/../../../../third_party)
 set(UX ${TP}/UxPlay/lib)
 
+# Local fixes to UxPlay, kept as patches so the submodule stays on its upstream commit; applied once.
+file(GLOB UX_PATCHES ${CMAKE_CURRENT_SOURCE_DIR}/../../../../patches/uxplay-*.patch)
+foreach(patch ${UX_PATCHES})
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${patch})
+    execute_process(COMMAND git -C ${TP}/UxPlay apply --reverse --check ${patch}
+            RESULT_VARIABLE already OUTPUT_QUIET ERROR_QUIET)
+    if(NOT already EQUAL 0)
+        execute_process(COMMAND git -C ${TP}/UxPlay apply ${patch} RESULT_VARIABLE rc)
+        if(NOT rc EQUAL 0)
+            message(FATAL_ERROR "cannot apply ${patch} to UxPlay")
+        endif()
+    endif()
+endforeach()
+
 # libplist 2.6, C part only.
 file(GLOB PLIST_SRC ${TP}/libplist/src/*.c ${TP}/libplist/libcnary/*.c)
 add_library(plist STATIC ${PLIST_SRC})
