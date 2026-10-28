@@ -348,6 +348,15 @@ static bool audio_failed;
 static AAudioStream *audio_stream;
 static float audio_gain = 1.0f;
 
+/* One summary line per stream after its first packets: whether the decoder makes sound and the sink takes it. */
+#define AUDIO_REPORT_AFTER 200
+static struct {
+    int packets, failed, written, peak;
+    aaudio_result_t first_error;
+    bool reported;
+} audio_stats;
+
+
 static void audio_release_locked(void) {
     if (audio_codec) {
         AMediaCodec_stop(audio_codec);
@@ -365,6 +374,7 @@ static void audio_release_locked(void) {
     }
     audio_ct = 0;
     audio_failed = false;
+    memset(&audio_stats, 0, sizeof(audio_stats));
 }
 
 /** Music-only AirPlay sends ALAC well ahead of time, so its stream gets a deep buffer and blocking writes. */
@@ -442,10 +452,25 @@ fail:
     return false;
 }
 
+static void audio_report_locked(void) {
+    if (audio_stats.reported || audio_stats.packets < AUDIO_REPORT_AFTER) return;
+    audio_stats.reported = true;
+    LOGI("audio ct=%d: %d packets, %d failed to decode, peak %d, %d frames written, first write error %s, gain %.3f, "
+         "sink state %d", audio_ct, audio_stats.packets, audio_stats.failed, audio_stats.peak, audio_stats.written,
+         audio_stats.first_error ? AAudio_convertResultToText(audio_stats.first_error) : "none", audio_gain,
+         audio_stream ? AAudioStream_getState(audio_stream) : -1);
+}
+
 static void audio_play_locked(int16_t *s, int frames, bool music) {
+    for (int i = 0; i < frames * 2 && !audio_stats.reported; i++) {
+        int v = s[i] < 0 ? -s[i] : s[i];
+        if (v > audio_stats.peak) audio_stats.peak = v;
+    }
     if (audio_gain < 0.999f) for (int i = 0; i < frames * 2; i++) s[i] = (int16_t) (s[i] * audio_gain);
     // Mirroring never blocks the RTP thread: a full sink drops the packet. Music waits for room instead.
     aaudio_result_t r = AAudioStream_write(audio_stream, s, frames, music ? 200000000LL : 0);
+    if (r >= 0) audio_stats.written += r;
+    else if (!audio_stats.first_error) audio_stats.first_error = r;
 }
 
 void audio_render(unsigned char ct, const unsigned char *data, int len) {
@@ -454,10 +479,13 @@ void audio_render(unsigned char ct, const unsigned char *data, int len) {
     if (audio_failed) goto out;
     if (!audio_ct && !audio_create_locked(ct)) goto out;
 
+    audio_stats.packets++;
     if (audio_alac) {
         int16_t pcm[4096 * 2];
         int frames = alac_decode(audio_alac, data, len, pcm, 4096);
         if (frames > 0) audio_play_locked(pcm, frames, true);
+        else audio_stats.failed++;
+        audio_report_locked();
         goto out;
     }
     ssize_t in = AMediaCodec_dequeueInputBuffer(audio_codec, 10000);
@@ -477,6 +505,7 @@ void audio_render(unsigned char ct, const unsigned char *data, int len) {
         if (pcm && info.size > 0) audio_play_locked((int16_t *) (pcm + info.offset), info.size / 4, false);
         AMediaCodec_releaseOutputBuffer(audio_codec, out, false);
     }
+    audio_report_locked();
 out:
     pthread_mutex_unlock(&audio_lock);
 }

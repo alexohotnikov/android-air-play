@@ -35,6 +35,7 @@ static jmethodID on_video_size;
 static jmethodID on_url_play, on_url_command, on_playback_info, on_playlist_remove;
 static jmethodID on_metadata, on_coverart, on_progress;
 static volatile bool audio_flushed;
+static volatile bool audio_seen;  // the first audio packet of a connection is logged
 static raop_t *raop;
 static dnssd_t *dnssd;
 static char host_name[64] = "AirPlay-TV";
@@ -88,7 +89,10 @@ static void post_video_size(int width, int height) {
 
 /* ---- RAOP callbacks ---- */
 
-static void cb_conn_init(void *cls) { post_event(EV_CONNECTED); }
+static void cb_conn_init(void *cls) {
+    audio_seen = false;
+    post_event(EV_CONNECTED);
+}
 static void cb_conn_destroy(void *cls) {
     video_stop();
     audio_stop();
@@ -106,6 +110,10 @@ static void cb_video_process(void *cls, raop_ntp_t *ntp, video_decode_struct *d)
     video_render(d->data, d->data_len, d->is_h265);
 }
 static void cb_audio_process(void *cls, raop_ntp_t *ntp, audio_decode_struct *d) {
+    if (!audio_seen) {
+        audio_seen = true;
+        LOGI("first audio packet: ct=%d, %d bytes", d->ct, d->data_len);
+    }
     if (audio_flushed) {
         audio_flushed = false;
         post_event(EV_AUDIO_PLAYING);
@@ -257,6 +265,7 @@ static void cb_on_video_info(void *cls, playback_info_t *info) {
 }
 
 static float cb_on_video_playlist_remove(void *cls) {
+    LOGI("playlist remove: pausing the URL video");
     bool attached;
     JNIEnv *env = jni_env(&attached);
     if (!env) return 0.0f;
@@ -267,6 +276,12 @@ static float cb_on_video_playlist_remove(void *cls) {
 static void cb_get_custom_profile(void *cls, const char **profile) { *profile = NULL; }
 
 static void log_callback(void *cls, int level, const char *msg) {
+    if (level >= LOGGER_DEBUG) {
+        // UxPlay's debug level for the requests that drive playback only: the TV keeps ~3000 log lines, and the
+        // once-a-second /feedback and /playback-info would push everything else out within minutes.
+        if (strstr(msg, "/feedback") || strstr(msg, "/playback-info")) return;
+        if (strncmp(msg, "Handling request", 16) && !strstr(msg, "action type") && !strstr(msg, "sync")) return;
+    }
     __android_log_print(level <= LOGGER_ERR ? ANDROID_LOG_ERROR : level <= LOGGER_INFO ? ANDROID_LOG_INFO
                                                                                      : ANDROID_LOG_DEBUG,
                         "UxPlay", "%s", msg);
@@ -383,7 +398,7 @@ Java_dev_okhotnikov_airplay_AirPlayBridge_nativeStart(JNIEnv *env, jclass cls, j
         goto done;
     }
     raop_set_log_callback(raop, log_callback, NULL);
-    raop_set_log_level(raop, LOGGER_INFO);
+    raop_set_log_level(raop, LOGGER_DEBUG);
     if (raop_init2(raop, 1, mac, keyfile)) {
         LOGE("raop_init2 failed");
         free(raop);
