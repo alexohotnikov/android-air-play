@@ -34,6 +34,8 @@ public final class AirPlayService extends Service implements AirPlayBridge.Liste
     static boolean videoOn;
     static int videoWidth, videoHeight;
     static int startError;
+    private static String pendingUrl;
+    static float pendingStart;
 
     private WifiManager.MulticastLock multicast;
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -124,8 +126,10 @@ public final class AirPlayService extends Service implements AirPlayBridge.Liste
         }
         if (event == AirPlayBridge.DISCONNECTED) {
             connected = false;
+            pendingUrl = null;
             main.removeCallbacks(reassert);
         }
+        if (event == AirPlayBridge.URL_END) pendingUrl = null;
         if (screen != null) screen.onAirPlayEvent(event);
     }
 
@@ -158,6 +162,32 @@ public final class AirPlayService extends Service implements AirPlayBridge.Liste
         videoWidth = width;
         videoHeight = height;
         if (screen != null) screen.onVideoSize(width, height);
+    }
+
+    @Override
+    public void onUrlPlay(String url, float startSeconds) {
+        AirPlayBridge.Playback.reset();
+        if (screen != null) {
+            screen.onUrlPlay(url, startSeconds);
+            return;
+        }
+        // No screen yet (a player's AirPlay button, without mirroring first): it plays this when it opens.
+        pendingUrl = url;
+        pendingStart = startSeconds;
+        openScreen();
+    }
+
+    @Override
+    public void onUrlCommand(int command, float value) {
+        if (command == AirPlayBridge.CMD_STOP) pendingUrl = null;
+        if (screen != null) screen.onUrlCommand(command, value);
+    }
+
+    /** The URL that arrived before the screen; null once taken. */
+    static String takePendingUrl() {
+        String url = pendingUrl;
+        pendingUrl = null;
+        return url;
     }
 
     // Android lets a background app open an activity only with "Display over other apps"; on the TV it is granted

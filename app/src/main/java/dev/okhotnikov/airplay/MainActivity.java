@@ -18,21 +18,31 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 /**
- * The screen of the receiver: the mirrored picture, or the idle screen. The server itself lives in AirPlayService;
- * opened by the service on connect (EXTRA_AUTO), this screen closes again when the sender leaves.
+ * The screen of the receiver: the mirrored picture, a video played by URL, or the idle screen. The server itself
+ * lives in AirPlayService; opened by the service on connect (EXTRA_AUTO), this screen closes again when the
+ * sender leaves.
  */
-public final class MainActivity extends Activity implements AirPlayBridge.Listener, SurfaceHolder.Callback {
+public final class MainActivity extends Activity implements AirPlayBridge.Listener, SurfaceHolder.Callback,
+        UrlPlayer.Callback {
 
     static final String EXTRA_AUTO = "auto";
     /** In front right now; the service checks it after waking the TV. Main thread only. */
     static boolean resumed;
+    // Mirroring stopping can be the first half of a switch to a URL video: wait before closing the screen.
+    private static final long CLOSE_DELAY_MS = 2500;
+    // A player's next video follows its "stop" by about 3 s: keep the screen for it instead of flashing Home.
+    private static final long NEXT_VIDEO_WAIT_MS = 6000;
 
     private SurfaceView surface;
+    private UrlPlayer urlPlayer;
     private View idle;
     private AuroraView aurora;
     private TextView title;
     private TextView status;
     private boolean auto;
+    private final Runnable closeIfIdle = () -> {
+        if (!urlPlayer.active() && !AirPlayService.videoOn) closeOrIdle();
+    };
 
     @Override
     protected void onCreate(Bundle state) {
@@ -50,6 +60,7 @@ public final class MainActivity extends Activity implements AirPlayBridge.Listen
         surface = new SurfaceView(this);
         surface.getHolder().addCallback(this);
         root.addView(surface, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
+        urlPlayer = new UrlPlayer(this, root, 1, this);
         idle = buildIdle();
         root.addView(idle, new FrameLayout.LayoutParams(-1, -1));
         setContentView(root);
@@ -112,6 +123,8 @@ public final class MainActivity extends Activity implements AirPlayBridge.Listen
         applyKnownSize();
         if (AirPlayService.videoOn) setIdleVisible(false);
         else showIdle();
+        String url = AirPlayService.takePendingUrl();
+        if (url != null) onUrlPlay(url, AirPlayService.pendingStart);
     }
 
     private void applyKnownSize() {
@@ -132,6 +145,9 @@ public final class MainActivity extends Activity implements AirPlayBridge.Listen
 
     @Override
     protected void onStop() {
+        idle.removeCallbacks(closeIfIdle);
+        // Leaving the screen ends a URL video: the sender sees it finish and takes the video back.
+        urlPlayer.release(urlPlayer.active());
         AirPlayService.detach(this);
         aurora.stop();
         if (!Prefs.background(this)) AirPlayService.stop(this);
@@ -140,9 +156,12 @@ public final class MainActivity extends Activity implements AirPlayBridge.Listen
 
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
-        boolean ok = keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER
-                || keyCode == KeyEvent.KEYCODE_MENU;
-        if (ok && idle.getVisibility() == View.VISIBLE) {
+        boolean ok = keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER;
+        if (urlPlayer.active() && (ok || keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)) {
+            urlPlayer.togglePause();
+            return true;
+        }
+        if ((ok || keyCode == KeyEvent.KEYCODE_MENU) && idle.getVisibility() == View.VISIBLE) {
             startActivity(new Intent(this, SettingsActivity.class));
             return true;
         }
@@ -153,40 +172,100 @@ public final class MainActivity extends Activity implements AirPlayBridge.Listen
     public void onAirPlayEvent(int event) {
         switch (event) {
             case AirPlayBridge.VIDEO_ON:
+                idle.removeCallbacks(closeIfIdle);
+                urlPlayer.release(false);
                 applyKnownSize();
                 setIdleVisible(false);
                 break;
             case AirPlayBridge.CONNECTED:
                 status.setText(R.string.connecting);
                 break;
-            case AirPlayBridge.DISCONNECTED:
+            case AirPlayBridge.MIRROR_TO_URL:
+                idle.removeCallbacks(closeIfIdle);
+                status.setText(R.string.loading_video);
+                setIdleVisible(true);
+                break;
             case AirPlayBridge.VIDEO_OFF:
-                // Opened for this session only: hand the TV back to whatever was on before.
-                if (auto) finish();
-                else showIdle();
+                if (urlPlayer.active()) break;
+                showIdle();
+                if (auto) idle.postDelayed(closeIfIdle, CLOSE_DELAY_MS);
+                break;
+            case AirPlayBridge.URL_END:
+                urlPlayer.release(false);
+                // Keep a failure on screen for a moment instead of vanishing as if the app had crashed.
+                if (status.getText().toString().equals(getString(R.string.url_failed))) {
+                    idle.postDelayed(closeIfIdle, CLOSE_DELAY_MS * 2);
+                } else {
+                    closeOrIdle();
+                }
+                break;
+            case AirPlayBridge.DISCONNECTED:
+                urlPlayer.release(false);
+                closeOrIdle();
                 break;
             default:
                 break;
         }
     }
 
+    /** Opened for this session only: hand the TV back to whatever was on before. */
+    private void closeOrIdle() {
+        if (auto) finish();
+        else showIdle();
+    }
+
+    @Override
+    public void onUrlPlay(String url, float startSeconds) {
+        idle.removeCallbacks(closeIfIdle);
+        status.setText(R.string.loading_video);
+        setIdleVisible(true);
+        urlPlayer.play(url, startSeconds);
+    }
+
+    @Override
+    public void onUrlCommand(int command, float value) {
+        if (command == AirPlayBridge.CMD_STOP) {
+            urlPlayer.release(true);
+            showIdle();
+            if (auto) idle.postDelayed(closeIfIdle, NEXT_VIDEO_WAIT_MS);
+        } else {
+            urlPlayer.command(command, value);
+        }
+    }
+
+    @Override
+    public void onUrlPlaying() {
+        setIdleVisible(false);
+    }
+
+    @Override
+    public void onUrlFinished(boolean failed) {
+        // The sender stops or sends the next video after its next poll; the idle screen covers the gap.
+        showIdle();
+        if (failed) status.setText(R.string.url_failed);
+    }
+
     @Override
     public void onVideoSize(int width, int height) {
-        // Letterbox: the picture keeps the sender's proportions (a portrait iPhone gets black bars at the sides).
-        View root = (View) surface.getParent();
+        fit(surface, width, height);
+    }
+
+    /** Letterbox: the picture keeps the sender's proportions (a portrait iPhone gets black bars at the sides). */
+    static void fit(View view, int width, int height) {
+        View root = (View) view.getParent();
         int rw = root.getWidth(), rh = root.getHeight();
         if (rw == 0 || rh == 0) {
-            root.post(() -> onVideoSize(width, height));
+            root.post(() -> fit(view, width, height));
             return;
         }
         int w = rw, h = rh;
         if ((long) width * rh > (long) height * rw) h = (int) ((long) rw * height / width);
         else w = (int) ((long) rh * width / height);
-        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) surface.getLayoutParams();
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) view.getLayoutParams();
         if (lp.width == w && lp.height == h) return;
         lp.width = w;
         lp.height = h;
-        surface.setLayoutParams(lp);
+        view.setLayoutParams(lp);
     }
 
     private void showIdle() {

@@ -20,12 +20,16 @@
 enum {
     EV_CONNECTED = 1, EV_DISCONNECTED = 2, EV_VIDEO_ON = 3, EV_VIDEO_OFF = 4,
     EV_AUDIO_ONLY = 5,     // music-only AirPlay: sound, no picture
+    EV_MIRROR_TO_URL = 6,  // mirroring stops because a video URL is about to play: keep the screen
+    EV_URL_END = 7,        // the URL video is over
 };
+enum { CMD_SCRUB = 1, CMD_RATE = 2, CMD_STOP = 3 };
 
 static JavaVM *jvm;
 static jclass bridge_class;
 static jmethodID on_event;
 static jmethodID on_video_size;
+static jmethodID on_url_play, on_url_command, on_playback_info, on_playlist_remove;
 static raop_t *raop;
 static dnssd_t *dnssd;
 static char host_name[64] = "AirPlay-TV";
@@ -46,6 +50,23 @@ static void post_event(int event) {
         attached = true;
     }
     (*env)->CallStaticVoidMethod(env, bridge_class, on_event, event);
+    if (attached) (*jvm)->DetachCurrentThread(jvm);
+}
+
+static JNIEnv *jni_env(bool *attached) {
+    JNIEnv *env;
+    *attached = false;
+    if ((*jvm)->GetEnv(jvm, (void **) &env, JNI_VERSION_1_6) == JNI_OK) return env;
+    if ((*jvm)->AttachCurrentThread(jvm, &env, NULL) != JNI_OK) return NULL;
+    *attached = true;
+    return env;
+}
+
+static void post_url_command(int cmd, float value) {
+    bool attached;
+    JNIEnv *env = jni_env(&attached);
+    if (!env) return;
+    (*env)->CallStaticVoidMethod(env, bridge_class, on_url_command, cmd, value);
     if (attached) (*jvm)->DetachCurrentThread(jvm);
 }
 
@@ -87,8 +108,33 @@ static void cb_video_resume(void *cls) {}
 static void cb_video_flush(void *cls) {}
 static void cb_audio_flush(void *cls) {}
 static void cb_video_reset(void *cls, reset_type_t type) {
-    video_stop();
-    post_event(EV_VIDEO_OFF);
+    LOGI("video reset, type %d", type);
+    switch (type) {
+        case RESET_TYPE_ON_VIDEO_PLAY:
+            return;
+        case RESET_TYPE_RTP_TO_HLS_TEARDOWN:
+            video_stop();
+            post_event(EV_MIRROR_TO_URL);
+            return;
+        case RESET_TYPE_RTP_SHUTDOWN:
+            video_stop();
+            post_event(EV_VIDEO_OFF);
+            return;
+        case RESET_TYPE_HLS_SHUTDOWN:
+            // As uxplay.cpp does: the app, not the library, drops the finished video and its proxy connections.
+            raop_destroy_airplay_video(raop, -1);
+            raop_remove_hls_connections(raop);
+            post_event(EV_URL_END);
+            return;
+        case RESET_TYPE_NOHOLD:
+            raop_destroy_airplay_video(raop, -1);
+            video_stop();
+            post_event(EV_URL_END);
+            return;
+        case RESET_TYPE_HLS_EOS:
+            post_event(EV_URL_END);
+            return;
+    }
 }
 static int cb_video_set_codec_and_size(void *cls, video_codec_t codec, unsigned short ws, unsigned short hs,
                                        unsigned short x, unsigned short y, unsigned short w, unsigned short h) {
@@ -127,13 +173,57 @@ static const char *cb_passwd(void *cls, int *len) {
     return NULL;
 }
 
-// HLS (YouTube-style "play this URL") is switched off in the features, so these stay empty.
-static void cb_on_video_play(void *cls, const char *loc, const float start) {}
-static void cb_on_video_scrub(void *cls, const float pos) {}
-static void cb_on_video_rate(void *cls, const float rate) {}
-static void cb_on_video_stop(void *cls) {}
-static void cb_on_video_info(void *cls, playback_info_t *info) {}
-static float cb_on_video_playlist_remove(void *cls) { return 0.0f; }
+// "Play this URL": an HLS stream through UxPlay's local proxy (YouTube) or a plain http(s) URL (Safari, many
+// players). Java plays it with MediaPlayer; the sender polls the position about once a second.
+static void cb_on_video_play(void *cls, const char *location, const float start) {
+    LOGI("play URL from %.1f s", start);
+    bool attached;
+    JNIEnv *env = jni_env(&attached);
+    if (!env) return;
+    jstring url = (*env)->NewStringUTF(env, location);
+    (*env)->CallStaticVoidMethod(env, bridge_class, on_url_play, url, start);
+    (*env)->DeleteLocalRef(env, url);
+    if (attached) (*jvm)->DetachCurrentThread(jvm);
+}
+static void cb_on_video_scrub(void *cls, const float pos) { post_url_command(CMD_SCRUB, pos); }
+static void cb_on_video_rate(void *cls, const float rate) { post_url_command(CMD_RATE, rate); }
+static void cb_on_video_stop(void *cls) { post_url_command(CMD_STOP, 0); }
+
+/** From Java's cached state, without waiting on the main thread: {duration, position, rate, finished}. */
+static void cb_on_video_info(void *cls, playback_info_t *info) {
+    bool attached;
+    JNIEnv *env = jni_env(&attached);
+    if (!env) return;
+    jdoubleArray a = (jdoubleArray) (*env)->CallStaticObjectMethod(env, bridge_class, on_playback_info);
+    double v[4] = {0, 0, 0, 0};
+    if (a) {
+        (*env)->GetDoubleArrayRegion(env, a, 0, 4, v);
+        (*env)->DeleteLocalRef(env, a);
+    }
+    if (attached) (*jvm)->DetachCurrentThread(jvm);
+    info->duration = v[0];
+    info->position = v[1];
+    info->rate = (float) v[2];
+    info->seek_start = 0;
+    info->seek_duration = v[0];
+    info->ready_to_play = true;
+    info->playback_likely_to_keep_up = true;
+    info->playback_buffer_empty = false;
+    info->playback_buffer_full = true;
+    if (v[3] != 0) {  // finished: tells the sender to move on or stop
+        info->duration = -1.0;
+        info->position = -1.0;
+    }
+}
+
+static float cb_on_video_playlist_remove(void *cls) {
+    bool attached;
+    JNIEnv *env = jni_env(&attached);
+    if (!env) return 0.0f;
+    float pos = (*env)->CallStaticFloatMethod(env, bridge_class, on_playlist_remove);
+    if (attached) (*jvm)->DetachCurrentThread(jvm);
+    return pos;
+}
 static void cb_get_custom_profile(void *cls, const char **profile) { *profile = NULL; }
 
 static void log_callback(void *cls, int level, const char *msg) {
@@ -143,9 +233,10 @@ static void log_callback(void *cls, int level, const char *msg) {
 }
 
 static void set_features(dnssd_t *d) {
-    // UxPlay's defaults for screen mirroring with audio; HLS (bits 0, 4) and H.265 (bit 42) off.
-    static const int on[] = {1, 2, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 25, 27, 28, 30};
-    static const int off[] = {0, 3, 4, 8, 23, 24, 26, 29, 31, 42};
+    // UxPlay's defaults for screen mirroring with audio, plus video by URL (bits 0 and 4: without them iOS treats
+    // the TV as a speaker and a player's AirPlay button sends sound only). H.265 (bit 42) off.
+    static const int on[] = {0, 1, 2, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 25, 27, 28, 30};
+    static const int off[] = {3, 8, 23, 24, 26, 29, 31, 42};
     for (size_t i = 0; i < sizeof(on) / sizeof(on[0]); i++) dnssd_set_airplay_features(d, on[i], 1);
     for (size_t i = 0; i < sizeof(off) / sizeof(off[0]); i++) dnssd_set_airplay_features(d, off[i], 0);
 }
@@ -173,6 +264,10 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     bridge_class = (*env)->NewGlobalRef(env, c);
     on_event = (*env)->GetStaticMethodID(env, c, "onNativeEvent", "(I)V");
     on_video_size = (*env)->GetStaticMethodID(env, c, "onNativeVideoSize", "(II)V");
+    on_url_play = (*env)->GetStaticMethodID(env, c, "onNativeUrlPlay", "(Ljava/lang/String;F)V");
+    on_url_command = (*env)->GetStaticMethodID(env, c, "onNativeUrlCommand", "(IF)V");
+    on_playback_info = (*env)->GetStaticMethodID(env, c, "onNativePlaybackInfo", "()[D");
+    on_playlist_remove = (*env)->GetStaticMethodID(env, c, "onNativePlaylistRemove", "()F");
     video_set_size_listener(post_video_size);
     return JNI_VERSION_1_6;
 }
@@ -257,6 +352,9 @@ Java_dev_okhotnikov_airplay_AirPlayBridge_nativeStart(JNIEnv *env, jclass cls, j
     raop_set_plist(raop, "height", height);
     raop_set_plist(raop, "refreshRate", 60);
     raop_set_plist(raop, "maxFPS", 60);
+    raop_set_plist(raop, "hls", 1);
+    // Kept as pointers by UxPlay: static strings. Audio and subtitle tracks preferred in HLS master playlists.
+    raop_set_lang(raop, "ru:en", "ru:en", "ru");
 
     unsigned short tcp[2] = {0, 0}, udp[3] = {0, 0, 0};
     raop_set_tcp_ports(raop, tcp);

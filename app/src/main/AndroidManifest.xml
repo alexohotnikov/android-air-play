@@ -19,7 +19,8 @@
         android:label="@string/app_name"
         android:icon="@drawable/ic_airplay"
         android:banner="@drawable/banner"
-        android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen">
+        android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen"
+        android:usesCleartextTraffic="true">
         <activity
             android:name=".MainActivity"
             android:exported="true"
