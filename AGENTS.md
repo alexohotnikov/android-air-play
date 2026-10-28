@@ -30,9 +30,12 @@ found out the hard way on that TV; check it against the code before relying on i
 | `SettingsActivity.java` | Name in Screen Mirroring (with "back to factory name") and "Работать в фоне" |
 | `Prefs.java` | Settings, the receiver's random but stable MAC-style identity, the mDNS host label |
 | `BootReceiver.java` | Starts the service at boot when background mode is on |
+| `UrlPlayer.java` | A sender's "play this URL" with ExoPlayer on its own SurfaceView; publishes position for the sender's polls |
+| `app/src/main/cpp/alac_bridge.cpp` | C face for Apple's ALAC decoder (`third_party/alac`, Apache 2.0) |
+| `patches/` | Local fixes to UxPlay, applied by CMake |
 | `AuroraView.java` | Idle background: four soft colour blobs drifting and changing hue, ~30 fps, stopped while video plays |
 | `scripts/build-openssl.sh` | Static OpenSSL `libcrypto` for `armeabi-v7a` into `third_party/openssl-android/` |
-| `third_party/UxPlay`, `third_party/libplist` | Git submodules: UxPlay `534e2cc`, libplist tag `2.6.0` |
+| `third_party/UxPlay`, `third_party/libplist`, `third_party/alac` | Git submodules: UxPlay `534e2cc`, libplist tag `2.6.0`, Apple ALAC |
 
 ## Build
 
@@ -102,6 +105,31 @@ receiver from the Mac with `dns-sd -B _airplay._tcp` and `dns-sd -B _raop._tcp`.
 - **Foreground service type** is `connectedDevice` (with `FOREGROUND_SERVICE_CONNECTED_DEVICE`); its runtime
   prerequisite is met by `CHANGE_WIFI_MULTICAST_STATE`.
 - **Idle cost** of the service: about 25 MB PSS and no measurable CPU.
+- **Standby on this Philips** only turns the panel off (`dumpsys power`: `mWakefulness=Asleep`): Android,
+  Wi-Fi, ADB and the foreground service keep running, and the TV still answers mDNS. So a sender finds a
+  sleeping TV, and `AirPlayService` wakes it on connect (`SCREEN_BRIGHT_WAKE_LOCK | ACQUIRE_CAUSES_WAKEUP`, plus
+  `setTurnScreenOn` on the screen) when "Будить телевизор при подключении" is on (the default). The firmware
+  opens Live TV (`org.droidtv.playtv`) at every power-on, so the service brings its screen back 3 s and 7 s
+  later if it is not in front. An app cannot put the TV back to sleep (`goToSleep` needs `DEVICE_POWER`).
+- **After an update** the service is killed and `START_STICKY` does not bring it back; `BootReceiver` also
+  listens for `MY_PACKAGE_REPLACED`.
+- **Video by URL** (a player's AirPlay button). Without feature bits 0 and 4, iOS treats the TV as a speaker
+  and sends the video's sound only, as ALAC (`ct=2`), which is why Apple's ALAC decoder is built in. With
+  them, UxPlay hands over either a local HLS proxy URL (`http://localhost:<port>/….m3u8`, YouTube) or the
+  player's own http(s) URL (VK Video: `https://…okcdn.ru/…/video.m3u8`). The platform `MediaPlayer` failed on
+  VK twice: `-1004` until the request carried an AppleCoreMedia user agent, then `-1007` (its HLS cannot read
+  fMP4 segments). ExoPlayer (Media3 1.4.1; newer needs compileSdk 35+) plays it; cleartext is allowed for the
+  localhost proxy.
+- **Switching videos in VK Video** goes through the queue, not `/play`: `POST /action playlistRemove` (the
+  current video) then `POST /action playlistInsert` (the next one, with its `Content-Location`), and iOS waits
+  for the receiver to start it. Upstream UxPlay answers 400 to any `/action` once `playlistRemove` has cleared
+  the current video, and does not implement `playlistInsert` (`FIXME`), so iOS gave up and sent sound only.
+  `patches/uxplay-0001-playlist-insert.patch` lets `/action` run with no current video, answers 200 to what
+  needs one, and plays an inserted plain http(s) item as `/play` does. Other items (YouTube's HLS) are logged
+  with their keys only.
+- **UxPlay patches** live in `patches/uxplay-*.patch`; `CMakeLists.txt` applies each one to the submodule once
+  at configure time and fails the build if one does not apply. `.gitmodules` sets `ignore = dirty` for it.
+  On the dev Mac the rtk hook rewrites `git diff` into a summary: make patches with `rtk proxy git diff`.
 - **Network on the target TV**: 5 GHz, about −54 dBm, 780 Mbit/s link; the built-in Ethernet port is
   unused. The network is not the bottleneck; a cable still removes one wireless hop.
 - **`logcat` on this TV holds about 3000 lines**: receiver logs rotate out within minutes. Pull them
@@ -119,7 +147,8 @@ receiver from the Mac with `dns-sd -B _airplay._tcp` and `dns-sd -B _raop._tcp`.
 
 ## Known gaps
 
-- No ALAC decoder (music-only AirPlay is silent), no HLS ("play this URL" mode), no A/V sync.
+- No A/V sync. Video by URL depends on UxPlay's HLS support, which lacks `playlistInsert` (queueing the next
+  video).
 - H.265 needs an HEVC SPS parser in `renderer.c` before bit 42 can be turned on.
 - Latency has not been measured. Measure before and after any change that claims to improve it (a camera
   filming a stopwatch on the iPhone next to the TV is enough).
