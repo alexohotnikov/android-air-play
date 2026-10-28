@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(airplaytv C)
+project(airplaytv C CXX)
 
 set(TP ${CMAKE_CURRENT_SOURCE_DIR}/../../../../third_party)
 set(UX ${TP}/UxPlay/lib)
@@ -29,6 +29,16 @@ target_link_libraries(airplay PUBLIC plist crypto)
 set_source_files_properties(${UX}/mdnsd/dnssd_mdnsd.c PROPERTIES COMPILE_FLAGS
         "-Dgethostname=airplaytv_gethostname -include stddef.h -include ${CMAKE_CURRENT_SOURCE_DIR}/hostname.h")
 
-add_library(airplaytv SHARED airplay_jni.c renderer.c)
+# Apple's ALAC decoder: the audio of music-only AirPlay (ct=2), which Android has no decoder for.
+set(ALAC ${TP}/alac/codec)
+add_library(alac STATIC ${ALAC}/ALACDecoder.cpp ${ALAC}/ALACBitUtilities.c ${ALAC}/EndianPortable.c
+        ${ALAC}/ag_dec.c ${ALAC}/dp_dec.c ${ALAC}/matrix_dec.c)
+target_include_directories(alac PUBLIC ${ALAC})
+# Its EndianPortable.c knows little-endian only on x86 and Windows: ARM would read the magic cookie byte-swapped
+# and Init() refuses it.
+target_compile_definitions(alac PRIVATE TARGET_RT_LITTLE_ENDIAN=1)
+target_compile_options(alac PRIVATE -O2 -w)
+
+add_library(airplaytv SHARED airplay_jni.c renderer.c alac_bridge.cpp)
 target_compile_options(airplaytv PRIVATE -O2 -Wall)
-target_link_libraries(airplaytv airplay mediandk aaudio android log)
+target_link_libraries(airplaytv airplay alac mediandk aaudio android log)

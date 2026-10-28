@@ -17,7 +17,10 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
-enum { EV_CONNECTED = 1, EV_DISCONNECTED = 2, EV_VIDEO_ON = 3, EV_VIDEO_OFF = 4 };
+enum {
+    EV_CONNECTED = 1, EV_DISCONNECTED = 2, EV_VIDEO_ON = 3, EV_VIDEO_OFF = 4,
+    EV_AUDIO_ONLY = 5,     // music-only AirPlay: sound, no picture
+};
 
 static JavaVM *jvm;
 static jclass bridge_class;
@@ -101,6 +104,7 @@ static void cb_audio_set_volume(void *cls, float volume) { audio_set_volume_db(v
 static void cb_audio_get_format(void *cls, unsigned char *ct, unsigned short *spf, bool *screen, bool *media,
                                 uint64_t *fmt) {
     LOGI("audio format ct=%d spf=%d screen=%d", *ct, *spf, *screen);
+    if (!*screen) post_event(EV_AUDIO_ONLY);
 }
 static void cb_audio_set_metadata(void *cls, const void *b, int n) {}
 static void cb_audio_set_coverart(void *cls, const void *b, int n) {}

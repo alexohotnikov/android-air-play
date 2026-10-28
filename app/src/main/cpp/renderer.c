@@ -1,6 +1,7 @@
 // Mirroring video and audio straight into the platform decoders: no JNI copies and no buffering beyond what the
 // decoders hold, so latency stays at what the sender's own pacing gives. A/V sync is not attempted.
 #include "renderer.h"
+#include "alac_bridge.h"
 
 #include <aaudio/AAudio.h>
 #include <android/log.h>
@@ -340,8 +341,10 @@ void video_stop(void) {
 /* ---- audio ---- */
 
 static pthread_mutex_t audio_lock = PTHREAD_MUTEX_INITIALIZER;
-static AMediaCodec *audio_codec;
-static unsigned char audio_ct;
+static AMediaCodec *audio_codec;   // AAC-ELD, AAC-LC
+static void *audio_alac;           // ALAC
+static unsigned char audio_ct;     // 0: nothing open; a format that failed stays here so it is not retried per packet
+static bool audio_failed;
 static AAudioStream *audio_stream;
 static float audio_gain = 1.0f;
 
@@ -351,25 +354,70 @@ static void audio_release_locked(void) {
         AMediaCodec_delete(audio_codec);
         audio_codec = NULL;
     }
+    if (audio_alac) {
+        alac_destroy(audio_alac);
+        audio_alac = NULL;
+    }
     if (audio_stream) {
         AAudioStream_requestStop(audio_stream);
         AAudioStream_close(audio_stream);
         audio_stream = NULL;
     }
     audio_ct = 0;
+    audio_failed = false;
+}
+
+/** Music-only AirPlay sends ALAC well ahead of time, so its stream gets a deep buffer and blocking writes. */
+static bool audio_open_sink_locked(bool music) {
+    AAudioStreamBuilder *b;
+    if (AAudio_createStreamBuilder(&b) != AAUDIO_OK) return false;
+    AAudioStreamBuilder_setSampleRate(b, 44100);
+    AAudioStreamBuilder_setChannelCount(b, 2);
+    AAudioStreamBuilder_setFormat(b, AAUDIO_FORMAT_PCM_I16);
+    AAudioStreamBuilder_setPerformanceMode(b, music ? AAUDIO_PERFORMANCE_MODE_NONE
+                                                    : AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
+    aaudio_result_t r = AAudioStreamBuilder_openStream(b, &audio_stream);
+    AAudioStreamBuilder_delete(b);
+    if (r != AAUDIO_OK) {
+        LOGE("AAudio open failed: %s", AAudio_convertResultToText(r));
+        audio_stream = NULL;
+        return false;
+    }
+    int32_t burst = AAudioStream_getFramesPerBurst(audio_stream);
+    // Mirroring: a few bursts, as AirPlay packets arrive in clumps over Wi-Fi. Music: as deep as the sink allows.
+    AAudioStream_setBufferSizeInFrames(audio_stream, music ? AAudioStream_getBufferCapacityInFrames(audio_stream)
+                                                           : burst * 8);
+    AAudioStream_requestStart(audio_stream);
+    return true;
 }
 
 static bool audio_create_locked(unsigned char ct) {
-    // ct from the RAOP setup: 8 AAC-ELD (screen mirroring), 4 AAC-LC; csd-0 as UxPlay's GStreamer caps give it.
+    audio_ct = ct;
+    if (ct == 2) {
+        // The ALAC magic cookie UxPlay's GStreamer caps give: 352 frames per packet, 16-bit, stereo, 44100 Hz.
+        static const uint8_t cookie[] = {
+                0x00, 0x00, 0x00, 0x24, 0x61, 0x6c, 0x61, 0x63, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x01, 0x60, 0x00, 0x10, 0x28, 0x0a, 0x0e, 0x02, 0x00, 0xff,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xac, 0x44};
+        audio_alac = alac_create(cookie, sizeof(cookie));
+        if (!audio_alac) {
+            LOGE("ALAC decoder refused the magic cookie");
+            goto fail;
+        }
+        if (!audio_open_sink_locked(true)) goto fail;
+        LOGI("audio ALAC started");
+        return true;
+    }
+    // 8 AAC-ELD (screen mirroring), 4 AAC-LC; csd-0 as UxPlay's GStreamer caps give it.
     static const uint8_t eld[] = {0xf8, 0xe8, 0x50, 0x00};
     static const uint8_t lc[] = {0x12, 0x10};
     const uint8_t *csd = ct == 8 ? eld : ct == 4 ? lc : NULL;
     if (!csd) {
-        LOGE("audio format ct=%d not supported (ALAC needs a decoder Android does not ship)", ct);
-        return false;
+        LOGE("audio format ct=%d not supported", ct);
+        goto fail;
     }
     audio_codec = AMediaCodec_createDecoderByType("audio/mp4a-latm");
-    if (!audio_codec) return false;
+    if (!audio_codec) goto fail;
     AMediaFormat *fmt = AMediaFormat_new();
     AMediaFormat_setString(fmt, AMEDIAFORMAT_KEY_MIME, "audio/mp4a-latm");
     AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_SAMPLE_RATE, 44100);
@@ -382,35 +430,34 @@ static bool audio_create_locked(unsigned char ct) {
         LOGE("audio decoder configure/start failed: %d", st);
         AMediaCodec_delete(audio_codec);
         audio_codec = NULL;
-        return false;
+        goto fail;
     }
-
-    AAudioStreamBuilder *b;
-    if (AAudio_createStreamBuilder(&b) != AAUDIO_OK) return false;
-    AAudioStreamBuilder_setSampleRate(b, 44100);
-    AAudioStreamBuilder_setChannelCount(b, 2);
-    AAudioStreamBuilder_setFormat(b, AAUDIO_FORMAT_PCM_I16);
-    AAudioStreamBuilder_setPerformanceMode(b, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
-    aaudio_result_t r = AAudioStreamBuilder_openStream(b, &audio_stream);
-    AAudioStreamBuilder_delete(b);
-    if (r != AAUDIO_OK) {
-        LOGE("AAudio open failed: %s", AAudio_convertResultToText(r));
-        audio_stream = NULL;
-        return false;
-    }
-    // A few bursts of headroom: AirPlay packets arrive in clumps over Wi-Fi.
-    AAudioStream_setBufferSizeInFrames(audio_stream, AAudioStream_getFramesPerBurst(audio_stream) * 8);
-    AAudioStream_requestStart(audio_stream);
-    audio_ct = ct;
+    if (!audio_open_sink_locked(false)) goto fail;
     LOGI("audio decoder ct=%d started", ct);
     return true;
+fail:
+    audio_release_locked();
+    audio_ct = ct;
+    audio_failed = true;
+    return false;
+}
+
+static void audio_play_locked(int16_t *s, int frames, bool music) {
+    if (audio_gain < 0.999f) for (int i = 0; i < frames * 2; i++) s[i] = (int16_t) (s[i] * audio_gain);
+    // Mirroring never blocks the RTP thread: a full sink drops the packet. Music waits for room instead.
+    aaudio_result_t r = AAudioStream_write(audio_stream, s, frames, music ? 200000000LL : 0);
 }
 
 void audio_render(unsigned char ct, const unsigned char *data, int len) {
     pthread_mutex_lock(&audio_lock);
-    if (audio_codec && audio_ct != ct) audio_release_locked();
-    if (!audio_codec && !audio_create_locked(ct)) {
-        audio_release_locked();
+    if (audio_ct && audio_ct != ct) audio_release_locked();
+    if (audio_failed) goto out;
+    if (!audio_ct && !audio_create_locked(ct)) goto out;
+
+    if (audio_alac) {
+        int16_t pcm[4096 * 2];
+        int frames = alac_decode(audio_alac, data, len, pcm, 4096);
+        if (frames > 0) audio_play_locked(pcm, frames, true);
         goto out;
     }
     ssize_t in = AMediaCodec_dequeueInputBuffer(audio_codec, 10000);
@@ -427,13 +474,7 @@ void audio_render(unsigned char ct, const unsigned char *data, int len) {
         if (out < 0) continue;
         size_t size = 0;
         uint8_t *pcm = AMediaCodec_getOutputBuffer(audio_codec, out, &size);
-        if (pcm && info.size > 0) {
-            int16_t *s = (int16_t *) (pcm + info.offset);
-            int samples = info.size / 2;
-            if (audio_gain < 0.999f) for (int i = 0; i < samples; i++) s[i] = (int16_t) (s[i] * audio_gain);
-            // Non-blocking: when the sink is full the packet is dropped rather than stalling the RTP thread.
-            AAudioStream_write(audio_stream, s, samples / 2, 0);
-        }
+        if (pcm && info.size > 0) audio_play_locked((int16_t *) (pcm + info.offset), info.size / 4, false);
         AMediaCodec_releaseOutputBuffer(audio_codec, out, false);
     }
 out:

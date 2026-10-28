@@ -11,6 +11,8 @@ final class AirPlayBridge {
     static final int DISCONNECTED = 2;
     static final int VIDEO_ON = 3;
     static final int VIDEO_OFF = 4;
+    /** Music-only AirPlay: sound, no picture. */
+    static final int AUDIO_ONLY = 5;
 
     interface Listener {
         void onAirPlayEvent(int event);
