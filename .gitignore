@@ -1,0 +1,7 @@
+.gradle/
+build/
+app/build/
+app/.cxx/
+local.properties
+third_party/openssl-android/
+third_party/openssl-3.0.15/

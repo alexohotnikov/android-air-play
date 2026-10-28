@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AirPlay</string>
+    <string name="ready">Готов к AirPlay</string>
+    <string name="hint">На iPhone или Mac: Пункт управления › Повтор экрана\nOK на пульте — настройки</string>
+    <string name="connecting">Подключение…</string>
+    <string name="start_failed">AirPlay не запустился (ошибка %1$d)</string>
+    <string name="notification">AirPlay: «%1$s»</string>
+    <string name="settings">Настройки AirPlay</string>
+    <string name="settings_name">Название в «Повторе экрана»</string>
+    <string name="settings_reset">Вернуть заводское: %1$s</string>
+    <string name="settings_background">Работать в фоне</string>
+    <string name="settings_background_hint">Телевизор всегда виден в «Повторе экрана», даже когда приложение закрыто, и включается вместе с ним. Выключено — AirPlay работает, только пока открыто это приложение.</string>
+    <string name="settings_overlay">Нет разрешения «Поверх других окон»: при подключении экран сам не откроется. Выдаётся через ADB: appops set dev.okhotnikov.airplay SYSTEM_ALERT_WINDOW allow</string>
+</resources>

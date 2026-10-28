@@ -1,0 +1,6 @@
+[submodule "third_party/UxPlay"]
+	path = third_party/UxPlay
+	url = https://github.com/FDH2/UxPlay
+[submodule "third_party/libplist"]
+	path = third_party/libplist
+	url = https://github.com/libimobiledevice/libplist

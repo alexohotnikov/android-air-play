@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape><solid android:color="#FF1C1C1E" /><size android:width="320dp" android:height="180dp" /></shape>
+    </item>
+    <item android:gravity="center" android:width="96dp" android:height="96dp" android:drawable="@drawable/ic_airplay" />
+</layer-list>
