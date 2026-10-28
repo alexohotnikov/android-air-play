@@ -35,6 +35,7 @@ public final class MainActivity extends Activity implements AirPlayBridge.Listen
 
     private SurfaceView surface;
     private UrlPlayer urlPlayer;
+    private NowPlayingView nowPlaying;
     private View idle;
     private AuroraView aurora;
     private TextView title;
@@ -61,6 +62,9 @@ public final class MainActivity extends Activity implements AirPlayBridge.Listen
         surface.getHolder().addCallback(this);
         root.addView(surface, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
         urlPlayer = new UrlPlayer(this, root, 1, this);
+        nowPlaying = new NowPlayingView(this);
+        nowPlaying.setVisibility(View.GONE);
+        root.addView(nowPlaying, new FrameLayout.LayoutParams(-1, -1));
         idle = buildIdle();
         root.addView(idle, new FrameLayout.LayoutParams(-1, -1));
         setContentView(root);
@@ -123,6 +127,7 @@ public final class MainActivity extends Activity implements AirPlayBridge.Listen
         applyKnownSize();
         if (AirPlayService.videoOn) setIdleVisible(false);
         else showIdle();
+        showNowPlayingIfMusic();
         String url = AirPlayService.takePendingUrl();
         if (url != null) onUrlPlay(url, AirPlayService.pendingStart);
     }
@@ -150,6 +155,7 @@ public final class MainActivity extends Activity implements AirPlayBridge.Listen
         urlPlayer.release(urlPlayer.active());
         AirPlayService.detach(this);
         aurora.stop();
+        nowPlaying.stop();
         if (!Prefs.background(this)) AirPlayService.stop(this);
         super.onStop();
     }
@@ -173,6 +179,7 @@ public final class MainActivity extends Activity implements AirPlayBridge.Listen
         switch (event) {
             case AirPlayBridge.VIDEO_ON:
                 idle.removeCallbacks(closeIfIdle);
+                hideNowPlaying();
                 urlPlayer.release(false);
                 applyKnownSize();
                 setIdleVisible(false);
@@ -180,8 +187,20 @@ public final class MainActivity extends Activity implements AirPlayBridge.Listen
             case AirPlayBridge.CONNECTED:
                 status.setText(R.string.connecting);
                 break;
+            case AirPlayBridge.AUDIO_ONLY:
+                if (!urlPlayer.active() && !AirPlayService.videoOn) status.setText(R.string.audio_only);
+                showNowPlayingIfMusic();
+                break;
+            case AirPlayBridge.NOW_PLAYING:
+            case AirPlayBridge.AUDIO_PAUSED:
+            case AirPlayBridge.AUDIO_PLAYING:
+            case AirPlayBridge.AUDIO_STOPPED:
+                if (nowPlaying.getVisibility() == View.VISIBLE) nowPlaying.update();
+                else showNowPlayingIfMusic();
+                break;
             case AirPlayBridge.MIRROR_TO_URL:
                 idle.removeCallbacks(closeIfIdle);
+                hideNowPlaying();
                 status.setText(R.string.loading_video);
                 setIdleVisible(true);
                 break;
@@ -200,12 +219,34 @@ public final class MainActivity extends Activity implements AirPlayBridge.Listen
                 }
                 break;
             case AirPlayBridge.DISCONNECTED:
+                hideNowPlaying();
                 urlPlayer.release(false);
                 closeOrIdle();
                 break;
             default:
                 break;
         }
+    }
+
+    /** Music-only AirPlay with something to show: the Now Playing screen replaces the idle one. */
+    private void showNowPlayingIfMusic() {
+        if (!AirPlayService.audioOnly || !NowPlaying.hasContent() || urlPlayer.active() || AirPlayService.videoOn) {
+            return;
+        }
+        idle.removeCallbacks(closeIfIdle);
+        if (nowPlaying.getVisibility() != View.VISIBLE) {
+            nowPlaying.setAlpha(0f);
+            nowPlaying.setVisibility(View.VISIBLE);
+            nowPlaying.animate().alpha(1f).setDuration(500).start();
+        }
+        nowPlaying.start();
+        setIdleVisible(false);
+    }
+
+    private void hideNowPlaying() {
+        if (nowPlaying.getVisibility() != View.VISIBLE) return;
+        nowPlaying.stop();
+        nowPlaying.setVisibility(View.GONE);
     }
 
     /** Opened for this session only: hand the TV back to whatever was on before. */
@@ -217,6 +258,7 @@ public final class MainActivity extends Activity implements AirPlayBridge.Listen
     @Override
     public void onUrlPlay(String url, float startSeconds) {
         idle.removeCallbacks(closeIfIdle);
+        hideNowPlaying();
         status.setText(R.string.loading_video);
         setIdleVisible(true);
         urlPlayer.play(url, startSeconds);

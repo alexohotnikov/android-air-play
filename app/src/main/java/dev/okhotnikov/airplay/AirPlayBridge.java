@@ -17,6 +17,14 @@ final class AirPlayBridge {
     static final int MIRROR_TO_URL = 6;
     /** The URL video is over. */
     static final int URL_END = 7;
+    /** Music: paused, or seeking (a FLUSH). */
+    static final int AUDIO_PAUSED = 8;
+    /** Music: sound again after a FLUSH. */
+    static final int AUDIO_PLAYING = 9;
+    /** Music: the audio stream was torn down, which is how iOS pauses; the track and artwork stay. */
+    static final int AUDIO_STOPPED = 10;
+    /** Music: {@link NowPlaying} changed (title, artwork or progress). Raised on the Java side. */
+    static final int NOW_PLAYING = 11;
 
     static final int CMD_SCRUB = 1;
     static final int CMD_RATE = 2;
@@ -97,6 +105,35 @@ final class AirPlayBridge {
         });
     }
 
+    @SuppressWarnings("unused")
+    private static void onNativeMetadata(byte[] dmap) {
+        MAIN.post(() -> {
+            NowPlaying.setMetadata(dmap);
+            dispatch(NOW_PLAYING);
+        });
+    }
+
+    @SuppressWarnings("unused")
+    private static void onNativeCoverArt(byte[] jpeg) {
+        android.graphics.Bitmap cover = NowPlaying.decodeCover(jpeg);
+        MAIN.post(() -> {
+            NowPlaying.cover = cover;
+            dispatch(NOW_PLAYING);
+        });
+    }
+
+    @SuppressWarnings("unused")
+    private static void onNativeProgress(long start, long curr, long end) {
+        MAIN.post(() -> {
+            NowPlaying.setProgress(start, curr, end);
+            dispatch(NOW_PLAYING);
+        });
+    }
+
+    private static void dispatch(int event) {
+        Listener l = listener;
+        if (l != null) l.onAirPlayEvent(event);
+    }
 
     @SuppressWarnings("unused")
     private static double[] onNativePlaybackInfo() {

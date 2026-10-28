@@ -22,6 +22,9 @@ enum {
     EV_AUDIO_ONLY = 5,     // music-only AirPlay: sound, no picture
     EV_MIRROR_TO_URL = 6,  // mirroring stops because a video URL is about to play: keep the screen
     EV_URL_END = 7,        // the URL video is over
+    EV_AUDIO_PAUSED = 8,   // music: a FLUSH (pause or seek)
+    EV_AUDIO_PLAYING = 9,  // music: the first sound after a FLUSH
+    EV_AUDIO_STOPPED = 10, // music: the audio stream torn down, which is how iOS pauses (TEARDOWN type 96)
 };
 enum { CMD_SCRUB = 1, CMD_RATE = 2, CMD_STOP = 3 };
 
@@ -30,6 +33,8 @@ static jclass bridge_class;
 static jmethodID on_event;
 static jmethodID on_video_size;
 static jmethodID on_url_play, on_url_command, on_playback_info, on_playlist_remove;
+static jmethodID on_metadata, on_coverart, on_progress;
+static volatile bool audio_flushed;
 static raop_t *raop;
 static dnssd_t *dnssd;
 static char host_name[64] = "AirPlay-TV";
@@ -101,12 +106,19 @@ static void cb_video_process(void *cls, raop_ntp_t *ntp, video_decode_struct *d)
     video_render(d->data, d->data_len, d->is_h265);
 }
 static void cb_audio_process(void *cls, raop_ntp_t *ntp, audio_decode_struct *d) {
+    if (audio_flushed) {
+        audio_flushed = false;
+        post_event(EV_AUDIO_PLAYING);
+    }
     audio_render(d->ct, d->data, d->data_len);
 }
 static void cb_video_pause(void *cls) {}
 static void cb_video_resume(void *cls) {}
 static void cb_video_flush(void *cls) {}
-static void cb_audio_flush(void *cls) {}
+static void cb_audio_flush(void *cls) {
+    audio_flushed = true;
+    post_event(EV_AUDIO_PAUSED);
+}
 static void cb_video_reset(void *cls, reset_type_t type) {
     LOGI("video reset, type %d", type);
     switch (type) {
@@ -152,10 +164,38 @@ static void cb_audio_get_format(void *cls, unsigned char *ct, unsigned short *sp
     LOGI("audio format ct=%d spf=%d screen=%d", *ct, *spf, *screen);
     if (!*screen) post_event(EV_AUDIO_ONLY);
 }
-static void cb_audio_set_metadata(void *cls, const void *b, int n) {}
-static void cb_audio_set_coverart(void *cls, const void *b, int n) {}
-static void cb_audio_stop_coverart(void *cls) {}
-static void cb_audio_set_progress(void *cls, uint32_t *s, uint32_t *c, uint32_t *e) {}
+/** Hands a buffer to Java unparsed: DMAP metadata and JPEG artwork are read there. */
+static void post_bytes(jmethodID method, const void *b, int n) {
+    if (!b || n <= 0) return;
+    bool attached;
+    JNIEnv *env = jni_env(&attached);
+    if (!env) return;
+    jbyteArray a = (*env)->NewByteArray(env, n);
+    if (a) {
+        (*env)->SetByteArrayRegion(env, a, 0, n, (const jbyte *) b);
+        (*env)->CallStaticVoidMethod(env, bridge_class, method, a);
+        (*env)->DeleteLocalRef(env, a);
+    }
+    if (attached) (*jvm)->DetachCurrentThread(jvm);
+}
+
+static void cb_audio_set_metadata(void *cls, const void *b, int n) { post_bytes(on_metadata, b, n); }
+static void cb_audio_set_coverart(void *cls, const void *b, int n) { post_bytes(on_coverart, b, n); }
+// UxPlay calls this when the sender tears down the audio stream, which iOS does on pause; resuming sets up a new
+// stream, and its first packet reports EV_AUDIO_PLAYING.
+static void cb_audio_stop_coverart(void *cls) {
+    audio_flushed = true;
+    post_event(EV_AUDIO_STOPPED);
+}
+
+/** RTP timestamps at 44100 Hz: track start, now, track end. Sent at a track change and after a seek. */
+static void cb_audio_set_progress(void *cls, uint32_t *start, uint32_t *curr, uint32_t *end) {
+    bool attached;
+    JNIEnv *env = jni_env(&attached);
+    if (!env) return;
+    (*env)->CallStaticVoidMethod(env, bridge_class, on_progress, (jlong) *start, (jlong) *curr, (jlong) *end);
+    if (attached) (*jvm)->DetachCurrentThread(jvm);
+}
 static void cb_audio_remote_control_id(void *cls, const char *dacp, const char *active) {}
 static void cb_export_dacp(void *cls, const char *active, const char *dacp) {}
 
@@ -268,6 +308,9 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     on_url_command = (*env)->GetStaticMethodID(env, c, "onNativeUrlCommand", "(IF)V");
     on_playback_info = (*env)->GetStaticMethodID(env, c, "onNativePlaybackInfo", "()[D");
     on_playlist_remove = (*env)->GetStaticMethodID(env, c, "onNativePlaylistRemove", "()F");
+    on_metadata = (*env)->GetStaticMethodID(env, c, "onNativeMetadata", "([B)V");
+    on_coverart = (*env)->GetStaticMethodID(env, c, "onNativeCoverArt", "([B)V");
+    on_progress = (*env)->GetStaticMethodID(env, c, "onNativeProgress", "(JJJ)V");
     video_set_size_listener(post_video_size);
     return JNI_VERSION_1_6;
 }

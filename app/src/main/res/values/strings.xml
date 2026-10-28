@@ -4,6 +4,7 @@
     <string name="ready">Готов к AirPlay</string>
     <string name="hint">На iPhone или Mac: Пункт управления › Повтор экрана\nOK на пульте — настройки</string>
     <string name="connecting">Подключение…</string>
+    <string name="audio_only">Играет звук с устройства</string>
     <string name="loading_video">Загрузка видео…</string>
     <string name="url_failed">Не удалось открыть видео</string>
     <string name="start_failed">AirPlay не запустился (ошибка %1$d)</string>

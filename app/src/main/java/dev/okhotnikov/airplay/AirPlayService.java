@@ -32,6 +32,8 @@ public final class AirPlayService extends Service implements AirPlayBridge.Liste
     private static AirPlayBridge.Listener screen;
     private static boolean running;
     static boolean videoOn;
+    /** Music-only AirPlay: sound and Now Playing data, no picture. */
+    static boolean audioOnly;
     static int videoWidth, videoHeight;
     static int startError;
     private static String pendingUrl;
@@ -115,6 +117,14 @@ public final class AirPlayService extends Service implements AirPlayBridge.Liste
     @Override
     public void onAirPlayEvent(int event) {
         if (event == AirPlayBridge.VIDEO_ON) videoOn = true;
+        if (event == AirPlayBridge.AUDIO_PAUSED || event == AirPlayBridge.AUDIO_STOPPED) NowPlaying.pause();
+        if (event == AirPlayBridge.AUDIO_PLAYING) NowPlaying.resume();
+        if (event == AirPlayBridge.CONNECTED || event == AirPlayBridge.DISCONNECTED) NowPlaying.reset();
+        if (event == AirPlayBridge.AUDIO_ONLY) audioOnly = true;
+        if (event == AirPlayBridge.VIDEO_ON || event == AirPlayBridge.MIRROR_TO_URL
+                || event == AirPlayBridge.DISCONNECTED) {
+            audioOnly = false;
+        }
         if (event == AirPlayBridge.VIDEO_OFF || event == AirPlayBridge.DISCONNECTED) {
             videoOn = false;
             // The next stream reports its own size; a stale one would squeeze its picture.
@@ -167,6 +177,7 @@ public final class AirPlayService extends Service implements AirPlayBridge.Liste
     @Override
     public void onUrlPlay(String url, float startSeconds) {
         AirPlayBridge.Playback.reset();
+        audioOnly = false;
         if (screen != null) {
             screen.onUrlPlay(url, startSeconds);
             return;
