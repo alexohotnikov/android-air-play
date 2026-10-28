@@ -56,16 +56,15 @@ public final class SettingsActivity extends Activity {
         });
         col.addView(reset, row(12));
 
-        background = new Switch(this);
-        background.setText(R.string.settings_background);
-        background.setTextSize(22);
-        background.setTextColor(0xFFFFFFFF);
-        background.setChecked(Prefs.background(this));
-        background.setPadding((int) (18 * dp), (int) (14 * dp), (int) (18 * dp), (int) (14 * dp));
-        background.setBackground(pill());
+        background = toggle(R.string.settings_background, Prefs.background(this));
         background.setOnCheckedChangeListener((v, on) -> Prefs.setBackground(this, on));
         col.addView(background, row(40));
         col.addView(label(getString(R.string.settings_background_hint), 15, 0x80FFFFFF, "sans-serif", 8));
+
+        Switch wake = toggle(R.string.settings_wake, Prefs.wakeOnConnect(this));
+        wake.setOnCheckedChangeListener((v, on) -> Prefs.setWakeOnConnect(this, on));
+        col.addView(wake, row(24));
+        col.addView(label(getString(R.string.settings_wake_hint), 15, 0x80FFFFFF, "sans-serif", 8));
 
         if (!Settings.canDrawOverlays(this)) {
             col.addView(label(getString(R.string.settings_overlay), 15, 0xFFFFB340, "sans-serif", 28));
@@ -94,6 +93,17 @@ public final class SettingsActivity extends Activity {
         v.setTypeface(Typeface.create(family, Typeface.NORMAL));
         v.setPadding(0, (int) (topDp * dp), 0, 0);
         return v;
+    }
+
+    private Switch toggle(int text, boolean checked) {
+        Switch s = new Switch(this);
+        s.setText(text);
+        s.setTextSize(22);
+        s.setTextColor(0xFFFFFFFF);
+        s.setChecked(checked);
+        s.setPadding((int) (18 * dp), (int) (14 * dp), (int) (18 * dp), (int) (14 * dp));
+        s.setBackground(pill());
+        return s;
     }
 
     private TextView button(String s) {

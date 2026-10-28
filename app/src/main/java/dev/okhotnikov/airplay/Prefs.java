@@ -47,6 +47,15 @@ final class Prefs {
         prefs(c).edit().putBoolean("background", on).apply();
     }
 
+    /** On: a sender connecting to a TV in standby switches it on. */
+    static boolean wakeOnConnect(Context c) {
+        return prefs(c).getBoolean("wake", true);
+    }
+
+    static void setWakeOnConnect(Context c, boolean on) {
+        prefs(c).edit().putBoolean("wake", on).apply();
+    }
+
     /** The mDNS host label: letters, digits and hyphens only. */
     static String hostName(String name) {
         String h = name.replaceAll("[^A-Za-z0-9]+", "-").replaceAll("^-+|-+$", "");

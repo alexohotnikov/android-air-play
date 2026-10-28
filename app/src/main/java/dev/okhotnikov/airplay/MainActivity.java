@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.os.Build;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -23,6 +24,8 @@ import android.widget.TextView;
 public final class MainActivity extends Activity implements AirPlayBridge.Listener, SurfaceHolder.Callback {
 
     static final String EXTRA_AUTO = "auto";
+    /** In front right now; the service checks it after waking the TV. Main thread only. */
+    static boolean resumed;
 
     private SurfaceView surface;
     private View idle;
@@ -36,6 +39,11 @@ public final class MainActivity extends Activity implements AirPlayBridge.Listen
         super.onCreate(state);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         auto = getIntent().getBooleanExtra(EXTRA_AUTO, false);
+        if (auto && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            // Opened for a sender: show even if the TV was in standby (the service decides whether to wake it).
+            setTurnScreenOn(true);
+            setShowWhenLocked(true);
+        }
 
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
@@ -108,6 +116,18 @@ public final class MainActivity extends Activity implements AirPlayBridge.Listen
 
     private void applyKnownSize() {
         if (AirPlayService.videoWidth > 0) onVideoSize(AirPlayService.videoWidth, AirPlayService.videoHeight);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        resumed = true;
+    }
+
+    @Override
+    protected void onPause() {
+        resumed = false;
+        super.onPause();
     }
 
     @Override

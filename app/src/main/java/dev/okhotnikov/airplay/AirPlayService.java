@@ -9,7 +9,10 @@ import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.net.wifi.WifiManager;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
+import android.os.PowerManager;
 import android.provider.Settings;
 import android.util.Log;
 
@@ -33,6 +36,8 @@ public final class AirPlayService extends Service implements AirPlayBridge.Liste
     static int startError;
 
     private WifiManager.MulticastLock multicast;
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private boolean connected;
 
     static void start(Context c) {
         c.startForegroundService(new Intent(c, AirPlayService.class));
@@ -98,6 +103,7 @@ public final class AirPlayService extends Service implements AirPlayBridge.Liste
     public void onDestroy() {
         AirPlayBridge.nativeStop();
         AirPlayBridge.setListener(null);
+        main.removeCallbacks(reassert);
         if (multicast != null) multicast.release();
         running = false;
         videoOn = false;
@@ -112,9 +118,40 @@ public final class AirPlayService extends Service implements AirPlayBridge.Liste
             // The next stream reports its own size; a stale one would squeeze its picture.
             videoWidth = videoHeight = 0;
         }
-        if (event == AirPlayBridge.CONNECTED && screen == null) openScreen();
+        if (event == AirPlayBridge.CONNECTED) {
+            connected = true;
+            onConnected();
+        }
+        if (event == AirPlayBridge.DISCONNECTED) {
+            connected = false;
+            main.removeCallbacks(reassert);
+        }
         if (screen != null) screen.onAirPlayEvent(event);
     }
+
+    private void onConnected() {
+        PowerManager pm = getSystemService(PowerManager.class);
+        if (pm.isInteractive()) {
+            if (screen == null) openScreen();
+            return;
+        }
+        // Philips standby only turns the panel off: Android, Wi-Fi and this server keep running, so the TV is
+        // still found in Screen Mirroring and can be woken here.
+        if (!Prefs.wakeOnConnect(this)) return;
+        Log.i(TAG, "sender connected in standby: waking the TV");
+        @SuppressWarnings("deprecation")
+        PowerManager.WakeLock wake = pm.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK
+                | PowerManager.ACQUIRE_CAUSES_WAKEUP | PowerManager.ON_AFTER_RELEASE, "airplay:wake");
+        wake.acquire(5000);
+        openScreen();
+        // The firmware opens Live TV at every power-on, possibly over this screen: bring it back once that is done.
+        main.postDelayed(reassert, 3000);
+        main.postDelayed(reassert, 7000);
+    }
+
+    private final Runnable reassert = () -> {
+        if (connected && !MainActivity.resumed) openScreen();
+    };
 
     @Override
     public void onVideoSize(int width, int height) {

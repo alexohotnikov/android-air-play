@@ -11,5 +11,7 @@
     <string name="settings_reset">Вернуть заводское: %1$s</string>
     <string name="settings_background">Работать в фоне</string>
     <string name="settings_background_hint">Телевизор всегда виден в «Повторе экрана», даже когда приложение закрыто, и включается вместе с ним. Выключено — AirPlay работает, только пока открыто это приложение.</string>
+    <string name="settings_wake">Будить телевизор при подключении</string>
+    <string name="settings_wake_hint">Если телевизор в режиме ожидания, подключение с iPhone или Mac включит его и сразу покажет картинку. Выключено — в режиме ожидания подключения не будят телевизор.</string>
     <string name="settings_overlay">Нет разрешения «Поверх других окон»: при подключении экран сам не откроется. Выдаётся через ADB: appops set dev.okhotnikov.airplay SYSTEM_ALERT_WINDOW allow</string>
 </resources>
